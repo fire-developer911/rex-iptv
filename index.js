@@ -8,60 +8,88 @@ const BROWSERLESS_TOKEN = '2U7ETRjJfkwXjAIa9c859d15f97834eb3cfae0e319b3b0fa6';
 const BROWSER_WSE = `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`;
 
 app.get('/resolve', async (req, res) => {
-    const targetUrl = req.query.url; // The URL sent from your Android app
+    const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send('No URL provided');
 
     let browser;
     try {
-        console.log(`Resolving: ${targetUrl}`);
+        console.log(`Starting resolution for: ${targetUrl}`);
+        
+        // Connect to Remote Browser
         browser = await puppeteer.connect({ browserWSEndpoint: BROWSER_WSE });
         
+        // Use the first available page
         let page = (await browser.pages())[0];
+        
+        // Set a realistic User-Agent to avoid bot detection
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+        // 1. Navigate to the Movie Page
         await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-        // 1. Wait for and Click the 'Watch' button
-        await page.waitForSelector('.btn.watch', { visible: true });
+        // 2. Find and Click the 'Watch' button
+        // We look for multiple possible selectors used by the new domain
+        const watchSelectors = ['.btn.watch', 'a.watch-btn', '.watch-link', 'a[href*="watch"]'];
+        
+        await page.waitForFunction((selectors) => {
+            return selectors.some(s => document.querySelector(s));
+        }, { timeout: 20000 }, watchSelectors);
 
         // Logic for New Tab (Ad or Player)
         const newTabPagePromise = new Promise(x => browser.once('targetcreated', target => x(target.page())));
         
-        await page.click('.btn.watch');
+        // Click the button using evaluate to bypass overlay blocks
+        await page.evaluate((selectors) => {
+            for (const s of selectors) {
+                const el = document.querySelector(s);
+                if (el) { el.click(); return; }
+            }
+        }, watchSelectors);
+
         console.log("Clicked Watch button.");
 
+        // Wait up to 4 seconds to see if a new tab opens
         const newPage = await Promise.race([
             newTabPagePromise,
             new Promise(resolve => setTimeout(() => resolve(null), 4000))
         ]);
 
         if (newPage) {
-            console.log("Switching focus to new tab...");
+            console.log("New tab detected (Ad or Player). Switching focus...");
             page = newPage; 
             await page.bringToFront();
         }
 
-        // 2. Wait for player to stabilize
-        await new Promise(resolve => setTimeout(resolve, 5000)); 
+        // 3. Give the player time to load iframes
+        await new Promise(resolve => setTimeout(resolve, 6000)); 
         
-        // 3. Look inside frames for the video source
+        // 4. Search all frames for the video source
         const frames = page.frames();
         let videoSource = null;
 
+        console.log(`Searching across ${frames.length} frames...`);
+
         for (const frame of frames) {
             try {
-                // First, try to click the play button like your script does
+                // Try to click the JW Player play icon if present
                 const playButton = await frame.$('.jw-icon-display');
                 if (playButton) await playButton.click();
 
-                // Now, extract the video URL from the frame's network or HTML
+                // Extract the direct video source
                 videoSource = await frame.evaluate(() => {
+                    // Try to find the <video> tag source
                     const video = document.querySelector('video');
-                    if (video && video.src) return video.src;
+                    if (video && video.src && video.src.startsWith('http')) return video.src;
                     
-                    // Look for common m3u8/mp4 patterns in scripts
+                    // Look for common m3u8/mp4 patterns in scripts (JW Player / VideoJS)
                     const scripts = Array.from(document.querySelectorAll('script')).map(s => s.innerText);
                     for (const s of scripts) {
-                        const match = s.match(/file\s*:\s*["'](http.*?\.(m3u8|mp4|ts).*?)["']/);
+                        const match = s.match(/file\s*:\s*["'](http.*?\.(m3u8|mp4|ts|mkv).*?)["']/i);
                         if (match) return match[1];
+                        
+                        // Fallback for some encoded sources
+                        const sourceMatch = s.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*["'](http.*?)["']/i);
+                        if (sourceMatch) return sourceMatch[1];
                     }
                     return null;
                 });
@@ -71,18 +99,24 @@ app.get('/resolve', async (req, res) => {
         }
 
         if (videoSource) {
-            console.log("Successfully found video source!");
+            console.log("Found Video Link: " + videoSource);
             res.send(videoSource);
         } else {
-            res.status(404).send('Could not find video link inside frames');
+            console.log("Failed to find source in frames.");
+            res.status(404).send('Could not find video link. The player might be blocked or require interaction.');
         }
 
     } catch (error) {
-        console.error("Error:", error);
+        console.error("Resolution Error:", error.message);
         res.status(500).send('Error: ' + error.message);
     } finally {
-        if (browser) await browser.disconnect();
+        if (browser) {
+            // Use disconnect instead of close for faster performance with browserless
+            await browser.disconnect();
+        }
     }
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Rex Bridge Server running on port ${PORT}`);
+});
