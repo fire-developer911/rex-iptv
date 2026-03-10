@@ -1,116 +1,107 @@
 const express = require('express');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer-remote'); // Use remote connection
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-// Use Render's port or fallback to 10000
-const PORT = process.env.PORT || 10000;
+// Get your API key from browserless.io (they have a free tier)
+const BROWSERLESS_TOKEN = '2U7ETRjJfkwXjAIa9c859d15f97834eb3cfae0e319b3b0fa6'; 
 
-// YOUR BROWSERLESS TOKEN INTEGRATED
-const BROWSERLESS_TOKEN = '2U7ETRjJfkwXjAIa9c859d15f97834eb3cfae0e319b3b0fa6';
-const BROWSER_WSE = `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`;
-
-app.get('/resolve', async (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send('No URL provided');
-
+app.get('/get-stream', async (req, res) => {
+    const movieIndex = parseInt(req.query.index) || 0;
     let browser;
+
     try {
-        console.log(`Starting resolution for: ${targetUrl}`);
+        console.log(`Connecting to Browserless for movie index: ${movieIndex}`);
         
-        browser = await puppeteer.connect({ 
-            browserWSEndpoint: BROWSER_WSE,
-            defaultViewport: { width: 1280, height: 720 }
+        // Connect to the remote browser instead of launching a local one
+        browser = await puppeteer.connect({
+            browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`,
         });
-        
-        let page = (await browser.pages())[0];
-        
+
+        const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        let caughtUrl = null;
 
-        try {
-            console.log("Searching for watch triggers...");
-            await page.waitForFunction(() => {
-                const triggers = Array.from(document.querySelectorAll('a, button, .btn'));
-                return triggers.some(el => 
-                    el.innerText.includes('مشاهدة') || 
-                    el.innerText.includes('Watch') || 
-                    el.className.includes('watch') ||
-                    el.href?.includes('watch')
-                );
-            }, { timeout: 25000 });
-
-            const newTabPagePromise = new Promise(x => browser.once('targetcreated', target => x(target.page())));
-
-            await page.evaluate(() => {
-                const triggers = Array.from(document.querySelectorAll('a, button, .btn'));
-                const target = triggers.find(el => 
-                    el.innerText.includes('مشاهدة') || 
-                    el.innerText.includes('Watch') || 
-                    el.className.includes('watch') ||
-                    el.href?.includes('watch')
-                );
-                if (target) target.click();
-            });
-
-            const newPage = await Promise.race([
-                newTabPagePromise,
-                new Promise(resolve => setTimeout(() => resolve(null), 5000))
-            ]);
-
-            if (newPage) {
-                console.log("New tab detected. Switching focus...");
-                page = newPage; 
-                await page.bringToFront();
+        // Sniffer
+        page.on('request', request => {
+            const url = request.url();
+            if (url.includes('.mp4') && !url.includes('yandex')) {
+                caughtUrl = url;
+                // We don't abort here to avoid crashing the remote browser's stream detection
             }
-        } catch (e) {
-            console.log("Click failed. Attempting direct URL guessing...");
-            const watchUrl = targetUrl.replace('/movie/', '/watch/');
-            await page.goto(watchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-        }
+        });
 
-        await new Promise(resolve => setTimeout(resolve, 8000)); 
+        // Step 1: Navigate & Cloudflare Bypass
+        await page.goto('https://shhaheid4u.net/', { waitUntil: 'networkidle2' });
         
-        const frames = page.frames();
-        let videoSource = null;
-
-        for (const frame of frames) {
-            try {
-                const playIcon = await frame.$('.jw-icon-display, .vjs-big-play-button');
-                if (playIcon) await playIcon.click();
-
-                videoSource = await frame.evaluate(() => {
-                    const video = document.querySelector('video');
-                    if (video && video.src && video.src.startsWith('http')) return video.src;
-                    
-                    const scripts = Array.from(document.querySelectorAll('script')).map(s => s.innerText);
-                    for (const s of scripts) {
-                        const match = s.match(/file\s*:\s*["'](http.*?\.(m3u8|mp4|ts|mkv).*?)["']/i);
-                        if (match) return match[1];
-                    }
-                    return null;
-                });
-                if (videoSource) break;
-            } catch (e) { continue; }
+        try { 
+            await page.waitForSelector('.card-content', { timeout: 8000 }); 
+        } catch { 
+            await page.reload({ waitUntil: 'networkidle2' }); 
+            await page.waitForSelector('.card-content'); 
         }
 
-        if (videoSource) {
-            res.send(videoSource);
+        // Step 2: Click movie and wait for new page
+        await Promise.all([
+            page.waitForNavigation({ waitUntil: 'networkidle2' }),
+            page.evaluate((idx) => {
+                const movies = document.querySelectorAll('.card-content');
+                if (movies[idx]) movies[idx].click();
+            }, movieIndex)
+        ]);
+
+        // Step 3: Click main Download
+        await page.waitForSelector('.btn.download');
+        await page.click('.btn.download');
+
+        // Step 4: Find fastved link and catch the popup tab
+        await page.waitForSelector('a.btn.btn-down');
+        
+        // Set up the listener for the new tab
+        const newTargetPromise = new Promise(resolve => browser.once('targetcreated', target => resolve(target.page())));
+
+        await page.evaluate(() => {
+            const target = Array.from(document.querySelectorAll('a.btn.btn-down')).find(b => b.href.includes('fastved.sbs'));
+            if (target) target.click();
+        });
+
+        const dPage = await newTargetPromise;
+        await dPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+        // Step 4: streamhg internal sequence
+        await dPage.waitForSelector('.downloadv-item');
+        await dPage.click('.downloadv-item');
+        
+        await new Promise(r => setTimeout(r, 1500)); 
+        await dPage.waitForSelector('.g-recaptcha.btn.btn-gr.submit-btn');
+        await dPage.click('.g-recaptcha.btn.btn-gr.submit-btn');
+
+        // Step 6: The final link generation
+        await new Promise(r => setTimeout(r, 8000));
+        await dPage.waitForSelector('.btn.btn-gr.submit-btn');
+        await dPage.click('.btn.btn-gr.submit-btn');
+
+        // Poll for URL
+        let timeoutCount = 0;
+        while (!caughtUrl && timeoutCount < 15) {
+            await new Promise(r => setTimeout(r, 1000));
+            timeoutCount++;
+        }
+
+        if (caughtUrl) {
+            console.log("Stream URL found!");
+            res.json({ success: true, url: caughtUrl });
         } else {
-            res.status(404).send('Could not find video link.');
+            res.status(404).json({ success: false, error: "Stream link timed out" });
         }
 
-    } catch (error) {
-        console.error("Critical Error:", error.message);
-        res.status(500).send('Server Error: ' + error.message);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: err.message });
     } finally {
-        if (browser) await browser.disconnect();
+        if (browser) await browser.disconnect(); // Always disconnect to save Browserless credits
     }
 });
 
-// ADDED: Root route to check if server is alive
-app.get('/', (req, res) => res.send('REX Bridge is Online!'));
-
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Rex Bridge Server active on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`API Online on port ${PORT}`));
