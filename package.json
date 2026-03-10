@@ -4,7 +4,7 @@
   "main": "index.js",
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer-core": "^21.0.0"
+    "puppeteer-remote": "^21.0.0"
   },
   "scripts": {
     "start": "node index.js"
