@@ -1,5 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer-remote'); // Use remote connection
+const puppeteer = require('puppeteer-core'); // Use remote connection
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -105,3 +105,4 @@ app.get('/get-stream', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`API Online on port ${PORT}`));
+
