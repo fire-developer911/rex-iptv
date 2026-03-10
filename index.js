@@ -1,9 +1,10 @@
-const express = require('express');
-const puppeteer = require('puppeteer-core'); // Use remote connection
+import express from 'express';
+import puppeteer from 'puppeteer-core';
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Get your API key from browserless.io (they have a free tier)
+// Your Browserless token
 const BROWSERLESS_TOKEN = '2U7ETRjJfkwXjAIa9c859d15f97834eb3cfae0e319b3b0fa6'; 
 
 app.get('/get-stream', async (req, res) => {
@@ -13,7 +14,6 @@ app.get('/get-stream', async (req, res) => {
     try {
         console.log(`Connecting to Browserless for movie index: ${movieIndex}`);
         
-        // Connect to the remote browser instead of launching a local one
         browser = await puppeteer.connect({
             browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_TOKEN}`,
         });
@@ -28,7 +28,6 @@ app.get('/get-stream', async (req, res) => {
             const url = request.url();
             if (url.includes('.mp4') && !url.includes('yandex')) {
                 caughtUrl = url;
-                // We don't abort here to avoid crashing the remote browser's stream detection
             }
         });
 
@@ -58,7 +57,6 @@ app.get('/get-stream', async (req, res) => {
         // Step 4: Find fastved link and catch the popup tab
         await page.waitForSelector('a.btn.btn-down');
         
-        // Set up the listener for the new tab
         const newTargetPromise = new Promise(resolve => browser.once('targetcreated', target => resolve(target.page())));
 
         await page.evaluate(() => {
@@ -100,9 +98,8 @@ app.get('/get-stream', async (req, res) => {
         console.error(err);
         res.status(500).json({ success: false, error: err.message });
     } finally {
-        if (browser) await browser.disconnect(); // Always disconnect to save Browserless credits
+        if (browser) await browser.disconnect();
     }
 });
 
 app.listen(PORT, () => console.log(`API Online on port ${PORT}`));
-
